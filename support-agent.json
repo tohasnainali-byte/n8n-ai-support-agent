@@ -1,0 +1,200 @@
+{
+  "name": "AI Customer Support Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": { "item": [ { "mode": "everyMinute" } ] },
+        "simple": false,
+        "filters": { "readStatus": "unread", "q": "is:unread" },
+        "options": {}
+      },
+      "id": "node-gmail-trigger",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [ -400, 0 ]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "fromEmail", "value": "={{ $json.from }}", "type": "string" },
+            { "id": "a2", "name": "subject", "value": "={{ $json.subject }}", "type": "string" },
+            { "id": "a3", "name": "question", "value": "={{ $json.snippet || $json.text }}", "type": "string" },
+            { "id": "a4", "name": "messageId", "value": "={{ $json.id }}", "type": "string" },
+            { "id": "a5", "name": "threadId", "value": "={{ $json.threadId }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-edit-fields",
+      "name": "Extract Email Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [ -180, 0 ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Customer question: {{ $json.question }}",
+        "options": {
+          "systemPromptTemplate": "You are a customer support assistant for Acme SaaS. Use ONLY the provided context from the help documentation to answer. If the context does not contain the answer, you must say you are not confident.\n\nRespond ONLY with a raw JSON object, no markdown, no backticks, in exactly this shape:\n{\"answer\": \"<your reply to the customer, friendly and concise>\", \"confidence\": <a number from 0 to 1 reflecting how well the context supports your answer>}\n\nContext:\n{context}"
+        }
+      },
+      "id": "node-qa-chain",
+      "name": "QA Chain",
+      "type": "@n8n/n8n-nodes-langchain.chainRetrievalQa",
+      "typeVersion": 1.5,
+      "position": [ 80, 0 ]
+    },
+    {
+      "parameters": {
+        "modelName": "models/gemini-2.0-flash",
+        "options": { "temperature": 0.2 }
+      },
+      "id": "node-gemini-chat",
+      "name": "Gemini Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [ 40, 220 ]
+    },
+    {
+      "parameters": {},
+      "id": "node-retriever",
+      "name": "Vector Store Retriever",
+      "type": "@n8n/n8n-nodes-langchain.retrieverVectorStore",
+      "typeVersion": 1,
+      "position": [ 260, 220 ]
+    },
+    {
+      "parameters": { "mode": "retrieve-as-tool", "memoryKey": "acme_docs" },
+      "id": "node-vstore-read",
+      "name": "Simple Vector Store (Read)",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.1,
+      "position": [ 260, 420 ]
+    },
+    {
+      "parameters": { "modelName": "models/text-embedding-004" },
+      "id": "node-embeddings-read",
+      "name": "Gemini Embeddings (Read)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsGoogleGemini",
+      "typeVersion": 1,
+      "position": [ 260, 620 ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the model's JSON output safely\nlet raw = $input.first().json.response?.text || $input.first().json.text || $input.first().json.response || '';\nif (typeof raw === 'object') raw = JSON.stringify(raw);\nraw = String(raw).replace(/```json/gi, '').replace(/```/g, '').trim();\nlet parsed;\ntry {\n  parsed = JSON.parse(raw);\n} catch (e) {\n  parsed = { answer: raw, confidence: 0 };\n}\nconst conf = Number(parsed.confidence) || 0;\nreturn [{ json: {\n  answer: parsed.answer || 'No answer generated.',\n  confidence: conf,\n  fromEmail: $('Extract Email Fields').first().json.fromEmail,\n  subject: $('Extract Email Fields').first().json.subject,\n  question: $('Extract Email Fields').first().json.question,\n  messageId: $('Extract Email Fields').first().json.messageId,\n  threadId: $('Extract Email Fields').first().json.threadId\n}}];"
+      },
+      "id": "node-confidence",
+      "name": "Parse + Confidence",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [ 380, 0 ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "version": 2, "caseSensitive": true, "typeValidation": "strict" },
+          "combinator": "and",
+          "conditions": [
+            { "id": "c1", "leftValue": "={{ $json.confidence }}", "rightValue": 0.7, "operator": { "type": "number", "operation": "gte" } }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-if",
+      "name": "Confident?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [ 600, 0 ]
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "subject": "={{ 'Re: ' + $json.subject }}",
+        "message": "={{ $json.answer }}",
+        "options": { "threadId": "={{ $json.threadId }}", "sendTo": "={{ $json.fromEmail }}" }
+      },
+      "id": "node-draft",
+      "name": "Create Reply Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [ 840, -120 ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "send",
+        "sendTo": "OWNER_EMAIL@example.com",
+        "subject": "={{ '⚠️ Needs human review: ' + $json.subject }}",
+        "message": "=A customer email needs your attention (AI was not confident).\n\nFrom: {{ $json.fromEmail }}\nQuestion: {{ $json.question }}\n\nAI draft attempt (confidence {{ $json.confidence }}):\n{{ $json.answer }}",
+        "options": {}
+      },
+      "id": "node-escalate",
+      "name": "Escalate to Owner",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [ 840, 120 ]
+    },
+    {
+      "parameters": {
+        "formTitle": "Load Help Docs",
+        "formDescription": "Run this once to ingest docs into the vector store",
+        "formFields": { "values": [ { "fieldLabel": "Paste help doc text", "fieldType": "textarea", "requiredField": true } ] }
+      },
+      "id": "node-ingest-trigger",
+      "name": "Manual Ingest (Form)",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.2,
+      "position": [ -400, 480 ]
+    },
+    {
+      "parameters": {
+        "mode": "insert",
+        "memoryKey": "acme_docs"
+      },
+      "id": "node-vstore-write",
+      "name": "Simple Vector Store (Insert)",
+      "type": "@n8n/n8n-nodes-langchain.vectorStoreInMemory",
+      "typeVersion": 1.1,
+      "position": [ -120, 480 ]
+    },
+    {
+      "parameters": {
+        "jsonMode": "expressionData",
+        "jsonData": "={{ $json['Paste help doc text'] }}",
+        "options": { "chunkSize": 800, "chunkOverlap": 100 }
+      },
+      "id": "node-doc-loader",
+      "name": "Default Data Loader",
+      "type": "@n8n/n8n-nodes-langchain.documentDefaultDataLoader",
+      "typeVersion": 1,
+      "position": [ 100, 680 ]
+    },
+    {
+      "parameters": { "modelName": "models/text-embedding-004" },
+      "id": "node-embeddings-write",
+      "name": "Gemini Embeddings (Insert)",
+      "type": "@n8n/n8n-nodes-langchain.embeddingsGoogleGemini",
+      "typeVersion": 1,
+      "position": [ -120, 700 ]
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": { "main": [ [ { "node": "Extract Email Fields", "type": "main", "index": 0 } ] ] },
+    "Extract Email Fields": { "main": [ [ { "node": "QA Chain", "type": "main", "index": 0 } ] ] },
+    "QA Chain": { "main": [ [ { "node": "Parse + Confidence", "type": "main", "index": 0 } ] ] },
+    "Gemini Chat Model": { "ai_languageModel": [ [ { "node": "QA Chain", "type": "ai_languageModel", "index": 0 } ] ] },
+    "Vector Store Retriever": { "ai_retriever": [ [ { "node": "QA Chain", "type": "ai_retriever", "index": 0 } ] ] },
+    "Simple Vector Store (Read)": { "ai_vectorStore": [ [ { "node": "Vector Store Retriever", "type": "ai_vectorStore", "index": 0 } ] ] },
+    "Gemini Embeddings (Read)": { "ai_embedding": [ [ { "node": "Simple Vector Store (Read)", "type": "ai_embedding", "index": 0 } ] ] },
+    "Parse + Confidence": { "main": [ [ { "node": "Confident?", "type": "main", "index": 0 } ] ] },
+    "Confident?": { "main": [ [ { "node": "Create Reply Draft", "type": "main", "index": 0 } ], [ { "node": "Escalate to Owner", "type": "main", "index": 0 } ] ] },
+    "Manual Ingest (Form)": { "main": [ [ { "node": "Simple Vector Store (Insert)", "type": "main", "index": 0 } ] ] },
+    "Gemini Embeddings (Insert)": { "ai_embedding": [ [ { "node": "Simple Vector Store (Insert)", "type": "ai_embedding", "index": 0 } ] ] },
+    "Default Data Loader": { "ai_document": [ [ { "node": "Simple Vector Store (Insert)", "type": "ai_document", "index": 0 } ] ] }
+  },
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}
