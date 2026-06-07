@@ -18,7 +18,7 @@ The confidence gate means the agent never sends hallucinated answers to customer
 - Confidence-gated routing for human handoff
 
 ## Demo
-[Watch the 90-second demo](YOUR_VIDEO_LINK_HERE)
+[Watch the 90-second demo](https://youtu.be/Ncfsby_rBfM)
 
 ## Setup
 Import `support-agent.json` into n8n, add your Gemini and Gmail credentials, load your help docs via the ingest form, and activate.
